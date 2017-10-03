@@ -1,0 +1,381 @@
+#+PROPERTY: session causal
+#+PROPERTY: exports both
+
+#+NAME: Load libraries
+#+BEGIN_SRC R :session causal :results output silent
+  library(simcausal)
+  library(dplyr)
+  library(coefplot)
+  library(boot)
+  library(purrr)
+  library(broom)
+#+END_SRC
+
+* Objective
+Show that causal effects can be reliably estimated as long as treatment is ignorable
+given the covariates
+* DAG of interest
+Let's specify the dag of interest
+#+NAME: Setup DAG of interest
+#+BEGIN_SRC R :session causal :results output silent
+    dag1 <- DAG.empty() +
+        node("zone",
+             distr = "rcat.b1",
+             probs = c(0.33, 0.33, 0.33)) +
+        node("tenure",
+             distr = "rnorm",
+             mean = ifelse(zone == 1, 365, 200),
+             sd = 10) +
+        node("fill",
+             distr = "rnorm",
+             mean = ifelse(zone == 1, 0.90, 0.95),
+             sd = 0.01) +
+        node("avail",
+             distr = "rnorm",
+             mean = 0.9 * fill,
+             sd = 0.025) +
+        node("conversion",
+             distr = "rbern",
+             prob = plogis(0.5 * avail - 0.001 * tenure))
+
+  dset1 <- set.DAG(dag1)
+  plotDAG(dset1)
+#+END_SRC
+
+We'll now simulate from the DAG
+#+NAME: Simulate from DAG
+#+BEGIN_SRC R :session causal :results output silent
+  df1 <- sim(dset1, n = 1000000, rndseed = 123) %>%
+      tbl_df() %>%
+      mutate(zone = factor(zone, levels = sort(unique(zone))))
+#+END_SRC
+
+Let's fit a model. We expect the coefficient of avail to be 0.5.
+
+#+BEGIN_SRC R :session causal :results output
+  mod1 <- glm(conversion ~ avail + tenure, df1, family="binomial")
+  coef(mod1)
+#+END_SRC
+
+#+RESULTS:
+: (Intercept)       avail      tenure
+:  0.05620424  0.43402813 -0.00100928
+
+The model output however shows a positive bias with the coefficient being 0.6.
+
+Let's investigate why this may be. Since the dataset was simulated by
+using the simcausal package, let's first investigate if the package
+is behaving as expected on simpler examples.
+
+* Simpler DAG with all continuous covariates
+#+NAME: all_continuous
+#+BEGIN_SRC R :session causal :results output graphics :file dag2.png
+  dag2 <- DAG.empty() +
+      node("A",
+           distr = "rnorm",
+           mean = 10,
+           sd = 1) +
+      node("B",
+           distr = "rnorm",
+           mean = A,
+           sd = 2) +
+      node("X",
+           distr = "rnorm",
+           mean = A,
+           sd = 0.5) +
+      node("Y",
+           distr = "rnorm",
+           mean = 7*B + 8*X,
+           sd = 1)
+
+  dset2 <- set.DAG(dag2)
+  plotDAG(dset2)
+#+END_SRC
+
+#+RESULTS: all_continuous
+[[file:dag2.png]]
+
+Data simulation time
+#+NAME: Simulate_data2
+#+BEGIN_SRC R :session causal :results output silent
+  df2 <- sim(dset2, n = 100000, rndseed = 123) %>%
+      tbl_df()
+#+END_SRC
+
+We expect the coeffecient of X to be 8.
+#+BEGIN_SRC R :session causal :results output graphics :file coef_2.png
+  mod2 <- glm(Y ~ X + B - 1, df2, family="gaussian")
+  coefplot(mod2, outer = TRUE)
+#+END_SRC
+
+#+RESULTS:
+[[file:coef_2.png]]
+
+We see that the coefficient is bang on target. We see that the data generated
+by simcausal are in line with our expectations. The fact that the first example
+didn't show this consistency could either be because simcausal's data generation
+mechanism doesn't line up with our expectations or because the model violated
+some causal assumptions.
+
+Let's now try a combination of continuous and discrete covariates to see if that
+is the problem.
+
+* Simpler DAG with a combination of continuous and discrete covariates
+#+BEGIN_SRC R :session causal :results output graphics :file dag3.png
+  dag3 <- DAG.empty() +
+      node("A",
+	   distr = "rcat.b1",
+	   probs = c(0.5, 0.5)) +
+      node("B",
+	   distr = "rnorm",
+	   mean = ifelse(A == 1, 100, 200),
+	   sd = 10) +
+      node("X",
+	   distr = "rnorm",
+	   mean = ifelse(A == 1, 50, 30),
+	   sd = 5) +
+      node("Y",
+	   distr = "rnorm",
+	   mean = 7*B + 8*X,
+	   sd = 10)
+
+  dset3 <- set.DAG(dag3)
+  plotDAG(dset3)
+#+END_SRC
+
+#+RESULTS:
+[[file:dag3.png]]
+
+#+NAME: Simulate_Data3
+#+BEGIN_SRC R :session causal :results output silent
+  df3 <- sim(dset3, n = 100000, rndseed = 123) %>%
+      tbl_df() %>%
+      mutate(A = factor(A, levels = sort(unique(A))))
+#+END_SRC
+
+We'll now build a model with B and X. The coefficient of X should again be 8.
+
+#+NAME: Model3
+#+BEGIN_SRC R :session causal :results output graphics :file coef_3.png
+mod3 <- glm(Y ~ B + X - 1, df3, family = "gaussian")
+coefplot(mod3, outer = TRUE)
+#+END_SRC
+
+#+RESULTS: Model3
+[[file:coef_3.png]]
+
+Alternatively, we could have blocked the backdoor path from X to Y by controlling
+for A. Let's build that model and verify that the coefficient is as expected.
+
+#+BEGIN_SRC R :session causal :results output
+mod3b <- glm(Y ~ A + X - 1, df3, family = "gaussian")
+coef(mod3b)
+#+END_SRC
+
+#+RESULTS:
+:
+:         A1          A2           X
+:  702.906543 1401.384524    7.952164
+
+We now see that there is a bias in the coefficient. Let's generate the data by hand
+instead of using simcausal and see if we can reproduce this behavior.
+
+** Manual data generation and check for dataset 3
+
+Let's first generate the data manually
+#+BEGIN_SRC R :session causal :results output silent
+  num_rows <- 1000000
+  df3_manual <- tibble(A = sample(c(1, 2),
+				  num_rows,
+				  replace = TRUE,
+				  prob = c(0.5, 0.5))) %>%
+      mutate(B = rnorm(num_rows,
+		       mean = ifelse(A == 1, 100, 200),
+		       sd = 10),
+	     X = rnorm(num_rows,
+		       mean = ifelse(A == 1, 50, 30),
+		       sd = 5),
+	     Y = rnorm(num_rows,
+		       mean = 7*B + 8*X,
+		       sd = 10)) %>%
+      mutate(A = factor(A, levels = sort(unique(A))))
+#+END_SRC
+
+Let's now build the model with B and X. We expect the coefficient of X to be 8.
+
+#+BEGIN_SRC R :session causal :results output
+mod3_manual <- glm(Y ~ B + X - 1, df3_manual, family = "gaussian")
+coef(mod3_manual)
+#+END_SRC
+
+#+RESULTS:
+:
+:       B        X
+: 7.000041 7.999846
+
+Pretty good. Let's now build the model with A and X. Again the coefficient of X
+should be 8.
+
+#+BEGIN_SRC R :session causal :results output
+mod3b_manual <- glm(Y ~ A + X - 1, df3_manual, family = "gaussian")
+coef(mod3b_manual)
+#+END_SRC
+
+#+RESULTS:
+:
+:         A1          A2           X
+:  699.112752 1399.665174    8.013074
+
+Just like before, we see that the coefficient of X shows some bias.
+Even though we generated about 100000 rows, perhaps there is some random
+variation. Let's do a simulation to see if this is the case.
+
+** Check if bias is due to random variation
+
+Let's generate the dataset multiple times with different random seeds
+to check for sampling variation.
+
+#+BEGIN_SRC R :session causal :results output
+  num_rows <- 100000
+  num_replicates <- 30
+
+  generate_df <- function(num_rows, rand_seed) {
+      set.seed(rand_seed)
+      df <- tibble(A = sample(c(1, 2),
+			      num_rows,
+			      replace = TRUE,
+			      prob = c(0.5, 0.5))) %>%
+	  mutate(B = rnorm(num_rows,
+			   mean = ifelse(A == 1, 100, 200),
+			   sd = 10),
+		 X = rnorm(num_rows,
+			   mean = ifelse(A == 1, 50, 30),
+			   sd = 5),
+		 Y = rnorm(num_rows,
+			   mean = 7*B + 8*X,
+			   sd = 10)) %>%
+	  mutate(A = factor(A, levels = sort(unique(A))))
+
+      return(df)
+  }
+
+  set.seed(1234)
+  seeds <- round(runif(num_replicates, 0, 10000))
+
+  df_list <- map(seeds, ~generate_df(num_rows, .x))
+#+END_SRC
+
+#+RESULTS:
+
+Let's now fit a model to each of these data sets and get the distribution of
+the coeffecients
+
+#+BEGIN_SRC R :session causal :results value :colnames yes
+  coef_df <- map_df(seq_along(df_list), function(df_num) {
+      print(sprintf("Processing df %d", df_num))
+      df <- df_list[[df_num]]
+      mod <- glm(Y ~ A + X - 1, df, family = "gaussian")
+      coefs <- tidy(mod) %>%
+	  select(term, estimate) %>%
+	  spread(term, estimate)
+      return(coefs)
+  })
+
+  summary_df <- data.frame(mean = mean(coef_df$X),
+			   se = sd(coef_df$X))
+#+END_SRC
+
+#+RESULTS:
+|             mean |                se |
+|------------------+-------------------|
+| 7.99317904222564 | 0.047111352864085 |
+
+So we see that the coefficient is pretty much right on the money and that
+the issues we were having with the data generated by simcausal were likely
+due to pure random variation.
+
+Let's now verify this by regenerating data from simcausal repeatedly.
+
+* Repeated generation and fitting using simcausal
+
+
+Let's generate the data first.
+
+#+BEGIN_SRC R :session causal :results silent
+  num_rows <- 100000
+  num_replicates <- 100
+
+  generate_df <- function(num_rows, randseed) {
+      df <- sim(dset1, n = num_rows, rndseed = randseed) %>%
+	  tbl_df() %>%
+	  mutate(zone = factor(zone, levels = sort(unique(zone))))
+      return(df)
+  }
+
+  set.seed(1234)
+  seeds <- round(runif(num_replicates, 0, 10000))
+
+  df_list <- map(seeds, ~generate_df(num_rows, .x))
+#+END_SRC
+
+#+BEGIN_SRC R :session causal :results value :colnames yes
+  coef_df <- map_df(seq_along(df_list), function(df_num) {
+      print(sprintf("Processing df %d", df_num))
+      df <- df_list[[df_num]]
+      mod <- glm(conversion ~ avail + tenure, df, family="binomial")
+      coefs <- tidy(mod) %>%
+	  select(term, estimate) %>%
+	  spread(term, estimate)
+      return(coefs)
+  })
+
+  summary_df <- data.frame(mean = mean(coef_df$avail),
+			   se = sd(coef_df$avail))
+#+END_SRC
+
+#+RESULTS:
+|              mean |                se |
+|-------------------+-------------------|
+| 0.504110659410496 | 0.279414234712509 |
+
+There you go. Right on the money!!!!
+
+* Summary
+This document showed that causal effects can be reliably estimated as long as
+treatment is ignorable via a simulation study. Initially, it appeared as though
+there may be a bias in the estimation of causal effects. But it turned out to be
+sampling variation.
+
+As a side note, I had also used bootstrap to measure the variation. But simple
+bootstrap will not correct for bias. That's something to look at on a different day.
+* Random
+** Generate bootstrap replicates to check bias
+#+NAME: Bootstrap
+#+BEGIN_SRC R :session causal :results output silent
+  boot_coef <- function(df, indices, form) {
+      df_boot <- df[indices,]
+      mod <- glm(form, data = df_boot, family = "gaussian")
+      return(coef(mod)[1])
+  }
+
+  boot_vals <- boot(df3_manual, boot_coef, 10, form = as.formula(Y ~ X + A - 1))
+#+END_SRC
+
+
+** Random tests
+#+BEGIN_SRC R :session causal :results output silent
+  abc <- data.frame(x = rnorm(100000, sd = 20), y = rnorm(100000, sd = 25))
+  abc$z <- plogis(0.5*abc$x + 0.75*abc$y)
+  abc <- tbl_df(abc) %>%
+      rowwise() %>%
+      mutate(ans = rbinom(1, 1, z))
+
+  boot_coef1 <- function(df, indices) {
+      df_boot <- df[indices,]
+      mod <- glm(ans ~ x + y - 1, data = df_boot, family = "binomial")
+      return(coef(mod)[1])
+  }
+
+  mod1 <- glm(ans ~ x + y - 1, abc, family = "binomial")
+  boot_vals1 <- boot(abc, boot_coef1, 100)
+#+END_SRC
