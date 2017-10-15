@@ -1,0 +1,108 @@
+#+TITLE: Propensity Score for Discrete and Continuous Treatments
+#+PROPERTY: session propensity
+#+PROPERTY: exports both
+
+#+NAME: Load libraries R
+#+BEGIN_SRC R :session propensity :results silent
+  library(dplyr)
+  library(ggplot2)
+  library(simcausal)
+  library(MatchIt)
+#+END_SRC
+
+* Discrete Treatments
+
+** Dataset Generation
+First let's generate the dataset. We'll use simcausal for this.
+
+#+BEGIN_SRC R :session propensity :results output graphics :file dag1.png
+  create_factor <- function(x)
+      factor(x, levels = sort(unique(x)))
+
+  dag1 <- DAG.empty() +
+      node("A",
+	   distr = "rcat.b1",
+	   probs = c(0.25, 0.25, 0.25, 0.25)) +
+      node("B",
+	   distr = "rcat.b1",
+	   probs = c(0.25, 0.75)) +
+      node("C",
+	   distr = "rnorm",
+	   mean = 7*B,
+	   sd = 1) +
+      node("T",
+	   distr = "rbern",
+	   prob = plogis(0.001*A - 1*B)) +
+      node("Y",
+	   distr = "rnorm",
+	   mean = 4*A + 7*C + T,
+	   sd = 0.5)
+
+  dset1 <- set.DAG(dag1)
+  plotDAG(dset1)
+#+END_SRC
+
+#+RESULTS:
+[[file:dag1.png]]
+
+The categorical variable A has 4 equally likely levels. The categorical
+variable B has two levels with 0.25 and 0.75 probability. The variable C
+has a mean of 7*B and the treatment is a Bernoulli random variable with
+a probability parameter dependent on 5*A + 7*B. The outcome variable Y
+is a linear combination of A, C and T.
+
+#+BEGIN_SRC R :session propensity :results silent
+  df1 <- sim(dset1, n = 10000, rndseed = 123) %>%
+      tbl_df() %>%
+      mutate(A = create_factor(A),
+	     B = create_factor(B))
+#+END_SRC
+
+** Propensity Score Estimation
+The treatment is ignorable if we control for any one of the following:
+- A and B
+- A and C
+- A, B and C
+
+We'll do all 3 in turn, just for kicks. The results shouldn't differ by much.
+
+#+BEGIN_SRC R :session propensity :results silent
+mod_1a <- glm(T ~ A + B, df1, family = "binomial")
+mod_1b <- glm(T ~ A + C, df1, family = "binomial")
+mod_1c <- glm(T ~ A + B + C, df1, family = "binomial")
+
+prop_1a <- predict(mod_1a, type = "response")
+prop_1b <- predict(mod_1b, type = "response")
+prop_1c <- predict(mod_1c, type = "response")
+#+END_SRC
+
+Now we can assess balance by looking at the propensity scores.
+
+#+BEGIN_SRC R :session propensity :results graphics :file pre1.png
+  ggplot(df1, aes(x = prop_1a)) +
+      geom_histogram(binwidth = 0.1) +
+      facet_wrap(~as.logical(T))
+#+END_SRC
+
+#+RESULTS:
+[[file:pre1.png]]
+
+Let's now perform balancing. We'll use the MatchIt package for this.
+
+#+BEGIN_SRC R :session propensity :results silent
+  match_1a <- matchit(T ~ A + B, df1)
+  match_1b <- matchit(T ~ A + C, df1)
+  match_1c <- matchit(T ~ A + B + C, df1)
+
+  matched_1a <- match.data(match_1a, distance = "pscore") %>%
+      tbl_df()
+
+  matched_1b <- match.data(match_1b, distance = "pscore")  %>%
+      tbl_df()
+
+  matched_1c <- match.data(match_1c, distance = "pscore")  %>%
+      tbl_df()
+
+  plot(match_1a, type = "hist")
+  plot(match_1a, type = "hist")
+#+END_SRC
