@@ -1,0 +1,112 @@
+#+TITLE: Use cobalt for Causal Inference
+
+#+NAME: Initialization
+#+BEGIN_SRC R :session cobalt :results output silent
+  library(dplyr)
+  library(ggplot2)
+  library(cobalt)
+  library(MatchIt)
+  library(CBPS)
+  data("lalonde", package = "cobalt")
+  df <- tbl_df(lalonde) %>%
+      mutate(treat = factor(treat, levels = c(0, 1)),
+	     married = factor(married, levels = c(0, 1)),
+	     nodegree = factor(nodegree, levels = c(0, 1)))
+
+#+END_SRC
+
+* Discrete Treatment
+Let's first use cobalt for a discrete treatment. We'll inspect
+the balance for all the other covariates.
+
+#+BEGIN_SRC R :session cobalt :results output
+  treat <- "treat"
+  outcome <- "re78"
+  covs <- setdiff(names(df), c(treat, outcome))
+  covs_df <- dplyr::select(df, -treat, -re78) %>%
+      as.data.frame()
+  bal.tab(f.build(treat, covs), as.data.frame(df), binary = "std") %>%
+      print()
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+Note: estimand and s.d.denom not specified; assuming ATT and treated.
+Balance Measures:
+               Type Diff.Un
+age         Contin. -0.3094
+educ        Contin.  0.0550
+race_black   Binary  1.7568
+race_hispan  Binary -0.3489
+race_white   Binary -1.8768
+married_0    Binary  0.8241
+nodegree_0   Binary -0.2443
+re74        Contin. -0.7211
+re75        Contin. -0.2903
+
+Sample sizes:
+    Control Treated
+All     429     185
+#+end_example
+
+Now let's perform balancing using matchit and compare 
+the standardized differences
+#+BEGIN_SRC R :session cobalt :results output
+  mout <- matchit(f.build(treat, covs), as.data.frame(df),
+		  method = "nearest", ratio = 1,
+		  caliper = 0.1,
+		  replace = FALSE)
+  bal.tab(mout, un = TRUE, binary = "std")
+  bal.plot(mout, binary = "std", var.name = "nodegree")
+  love.plot(bal.tab(mout), threshold = 0.1)
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+
+  Call:
+  matchit(formula = f.build(treat, covs), data = df, method = "nearest", 
+      ratio = 1, caliper = 0.1, replace = FALSE)
+
+  Balance Measures:
+		  Type Diff.Un Diff.Adj
+  distance    Distance  1.7941   0.0839
+  age          Contin. -0.3094   0.1360
+  educ         Contin.  0.0550   0.0941
+  race_black    Binary  1.7568   0.0247
+  race_hispan   Binary -0.3489   0.0380
+  race_white    Binary -1.8768  -0.0606
+  married_0     Binary  0.8241   0.0000
+  nodegree_0    Binary -0.2443   0.0000
+  re74         Contin. -0.7211  -0.0222
+  re75         Contin. -0.2903   0.0384
+
+  Sample sizes:
+	    Control Treated
+  All           429     185
+  Matched       111     111
+  Unmatched     318      74
+#+end_example
+
+Let's use CBPS and see the results
+#+BEGIN_SRC R :session cobalt :results output silent
+  cbps_out <- CBPS(f.build(treat, covs), as.data.frame(df))
+  bal.tab(cbps_out, un = TRUE, binary = "std")
+  bal.plot(cbps_out, binary = "std", var.name = "age")
+  love.plot(bal.tab(cbps_out), threshold = 0.1)
+#+END_SRC
+
+* Continuous Treatment
+Let's setup treatment and covariates for the continuous treatment
+
+#+BEGIN_SRC R :session cobalt :results output silent
+  treat <- "re75"
+  outcome <- "re78"
+  covs <- setdiff(names(df), c(treat, outcome, "treat"))
+  cbps_out <- CBPS(f.build(treat, covs), as.data.frame(df),
+		   method = "exact")
+  bal.tab(cbps_out, binary = "std", un = TRUE, int = TRUE,
+	  r.threshold = 0.1)
+  love.plot(bal.tab(cbps_out), threshold = 0.1)
+#+END_SRC
+
