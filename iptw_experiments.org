@@ -1,0 +1,198 @@
+This document will test the theory that once balancing is performed properly,
+any regression model can be used to estimate causal effect. In particular, 
+when models like Lasso or XGBoost are used, will the shrinkage of the 
+coefficients cause incorrect estimatioin?
+
+#+BEGIN_SRC R :session iptw :results output silent
+library(plyr)
+library(dplyr)
+library(simcausal)
+library(cobalt)
+library(ggplot2)
+library(caret)
+#+END_SRC
+
+Generate data
+
+#+BEGIN_SRC R :session iptw :results output graphics :file iptw1.png
+  set.seed(123)
+  treatment_effect <- 3
+
+  dag1 <- DAG.empty() +
+      node("zone",
+	   distr = "rcat.b1",
+	   probs = c(0.02, 0.03, 0.95)) +
+      node("dow",
+	   distr = "rcat.b1",
+	   probs = rep(1/7, 7)) +
+      node("treatment",
+	   distr = "rbern",
+	   prob = plogis(0.3 * zone + 0.5 * dow)) +
+      node("outcome",
+	   distr = "rnorm",
+	   mean = 13 * zone + treatment_effect * treatment + 6 * dow + 7 * zone * dow,
+	   sd = 1)
+
+  dset1 <- set.DAG(dag1)
+  plotDAG(dset1)
+  df1 <- sim(dset1, n = 10000, rndseed = 123) %>%
+      tbl_df() %>%
+      mutate(zone = factor(zone, levels = sort(unique(zone))),
+	     dow = factor(dow, levels = sort(unique(dow))),
+	     treatment = factor(treatment, levels = sort(unique(treatment))))
+#+END_SRC
+
+#+RESULTS:
+[[file:iptw1.png]]
+
+Inspect and visualize balance
+
+#+BEGIN_SRC R :session iptw :results output
+  bal.plot(treatment ~ zone + dow, data = as.data.frame(df1), var.name = "zone")
+  bal.plot(treatment ~ zone + dow, data = as.data.frame(df1), var.name = "dow")
+
+  bal_tab <- bal.tab(treatment ~ zone + dow, as.data.frame(df1),
+		     binary = "std", estimand = "ATE")
+  print(bal_tab)
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+Balance Measures:
+         Type Diff.Un
+zone_1 Binary -0.1348
+zone_2 Binary -0.0157
+zone_3 Binary  0.1066
+dow_1  Binary -0.5872
+dow_2  Binary -0.3201
+dow_3  Binary -0.0823
+dow_4  Binary  0.1634
+dow_5  Binary  0.3440
+dow_6  Binary  0.4230
+dow_7  Binary  0.4623
+
+Sample sizes:
+    Control Treated
+All     763    9237
+#+end_example
+
+
+Fit selection model (propensity score model)
+
+#+BEGIN_SRC R :session iptw :results output silent
+  prop_mod1 <- glm(treatment ~ zone + dow, df1,
+		  family = "binomial")
+
+  df1 <- mutate(df1, weight = ifelse(treatment == 1,
+				     1/prop_mod1$fitted.values,
+				     1/(1 - prop_mod1$fitted.values)))
+#+END_SRC
+
+Estimate treatment effect using simple linear regression
+without weighting
+
+#+BEGIN_SRC R :session iptw :results output silent
+  mod1_lm <- lm(outcome ~ zone + dow + treatment, df1)
+  coef(mod1_lm)[10]
+#+END_SRC
+
+Now estimate the treatment effect with weighting
+
+#+BEGIN_SRC R :session iptw :results output silent
+  mod1_lmw <- lm(outcome ~ zone + dow + treatment, df1, weights = df1$weight)
+  coef(mod1_lmw)[10]
+#+END_SRC
+
+Now let's use xgboost without weighting
+
+#+BEGIN_SRC R :session iptw :results output silent
+  ctrl <- trainControl(method = "none")
+  tune_grid <- data.frame(nrounds = 150,
+			  max_depth = 6,
+			  eta = 0.1,
+			  gamma = 0,
+			  colsample_bytree = 0.8,
+			  min_child_weight = 1,
+			  subsample = 1)
+
+  mod1_xgb <- train(outcome ~ treatment + zone + dow,
+		    df1,
+		    method = "xgbTree",
+		    tuneGrid = tune_grid)
+
+#+END_SRC
+
+Now let's use xgboost with weighting (needs verification to see if weights were used)
+
+#+BEGIN_SRC R :session iptw :results output silent
+  ctrl <- trainControl(method = "none")
+  tune_grid <- data.frame(nrounds = 150,
+			  max_depth = 6,
+			  eta = 0.1,
+			  gamma = 0,
+			  colsample_bytree = 0.8,
+			  min_child_weight = 1,
+			  subsample = 1)
+
+  mod1_xgbw <- train(outcome ~ treatment + zone + dow,
+		     df1,
+		     method = "xgbTree",
+		     tuneGrid = tune_grid,
+		     weight = df1$weight)
+#+END_SRC
+
+Let's use ranger without weighting
+
+#+BEGIN_SRC R :session iptw :results output silent
+  mod1_ranger <- ranger(outcome ~ zone + dow + treatment,
+			df1,
+			respect.unordered.factors = TRUE)
+#+END_SRC
+
+Let's now use ranger with weighting
+
+#+BEGIN_SRC R :session iptw :results output silent
+  mod1_rangerw <- ranger(outcome ~ zone + dow + treatment,
+			 df1,
+			 respect.unordered.factors = TRUE,
+			 case.weights = df1$weight)
+#+END_SRC
+
+Let's now calculate the ATE from these models and compare 
+with the known value of 3
+#+BEGIN_SRC R :session iptw :results table :colnames yes
+  ate <- data_frame(actual = treatment_effect,
+		    lm = calc_ate(df1, mod1_lm, pred_func),
+		    lmw = calc_ate(df1, mod1_lmw, pred_func),
+		    ranger = calc_ate(df1, mod1_ranger, ranger_pred_func),
+		    rangerw = calc_ate(df1, mod1_rangerw, ranger_pred_func))
+
+  print.data.frame(ate)
+#+END_SRC
+
+#+RESULTS:
+| actual |               lm |              lmw |          ranger |          rangerw |
+|--------+------------------+------------------+-----------------+------------------|
+|      3 | 2.46538336492188 | 3.14105132090479 | 16.407119013476 | 2.32736151868459 |
+
+* Misc Functions
+#+BEGIN_SRC R :session iptw :results output silent
+  weighted_rmse <- function(yhat, y, w, ...)
+      return(sqrt(weighted.mean((yhat - y)^2, w), ...))
+
+  calc_ate <- function(df, fit, pred_func) {
+      untreated_df <- mutate(df, treatment = "0")
+      treated_df <- mutate(df, treatment = "1")
+
+      treated_preds <- pred_func(fit, treated_df)
+      untreated_preds <- pred_func(fit, untreated_df)
+
+      return(mean((treated_preds - untreated_preds)))
+  }
+
+  pred_func <- function(fit, df)
+      predict(fit, df)
+
+  ranger_pred_func <- function(fit, df)
+      predict(fit, df)$predictions
+#+END_SRC
