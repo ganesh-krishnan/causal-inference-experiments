@@ -1,0 +1,151 @@
+This document outlines the IPTW analysis required for the Coursera course,
+"A Crash Course in Causal Inference".
+
+For this assignment we will use data from Lalonde (1986), 
+that aimed to evaluate the impact of National Supported 
+Work (NSW) Demonstration, which is a labor training program, 
+on post-intervention income levels. Interest is in estimating 
+the causal effect of this training program on income.
+
+** Load libraries
+#+BEGIN_SRC R :session iptw :results output silent
+  library(dplyr)
+  library(survey)
+  library(sandwich)
+  devtools::load_all("~/oss/cobalt")
+#+END_SRC
+
+** Prepare Data
+#+BEGIN_SRC R :session iptw :results output silent
+  data(lalonde)
+  df <- tbl_df(lalonde) %>%
+      mutate(treat = factor(treat, levels = c(0, 1)),
+	     married = factor(married, levels = c(0, 1)),
+	     nodegree = factor(nodegree, levels = c(0, 1)))
+#+END_SRC
+
+** Check for covariate balance
+#+BEGIN_SRC R :session iptw :results output 
+  covs <- c("age", "educ", "race", "married", 
+	    "nodegree", "re74", "re75")
+
+  treatment <- "treat"
+  prop_formula <- f.build(treatment, covs)
+  bal.tab(prop_formula, df, binary = "std", estimand = "ATE")
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+Balance Measures:
+               Type Diff.Un
+age         Contin. -0.2419
+educ        Contin.  0.0448
+race_black   Binary  1.6677
+race_hispan  Binary -0.2769
+race_white   Binary -1.4057
+married_0    Binary  0.7195
+nodegree     Binary  0.2350
+re74        Contin. -0.5958
+re75        Contin. -0.2870
+
+Sample sizes:
+    Control Treated
+All     429     185
+#+end_example
+
+** Fit Propensity Model
+#+BEGIN_SRC R :session iptw :results output silent
+  prop_mod <- glm(prop_formula, df, family = "binomial")
+  weights <- ifelse(df$treat == 1, 
+		    1/prop_mod$fitted.values,
+		    1/(1 - prop_mod$fitted.values))
+#+END_SRC
+
+*** What are the minimum and maximum weights?
+#+BEGIN_SRC R :session iptw :results output
+summary(weights)
+#+END_SRC
+
+#+RESULTS:
+:    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+:   1.009   1.052   1.170   1.905   1.623  40.080
+
+*** Find the standardized difference for nodegree
+#+BEGIN_SRC R :session iptw :results output
+  bal_tab <- bal.tab(prop_formula, df, binary = "std",
+		     method = "weighting",
+		     weights = weights,
+		     estimand = "ATE")
+
+  print(bal_tab)
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+Balance Measures:
+               Type Diff.Adj
+age         Contin.  -0.1676
+educ        Contin.   0.1296
+race_black   Binary   0.1300
+race_hispan  Binary   0.0156
+race_white   Binary  -0.1376
+married_0    Binary   0.2098
+nodegree     Binary  -0.1155
+re74        Contin.  -0.2740
+re75        Contin.  -0.1579
+
+Effective sample sizes:
+           Control Treated
+Unadjusted     429  185.00
+Adjusted       329   58.33
+#+end_example
+
+*** Show before/after Love plot
+#+BEGIN_SRC R :session iptw :results output graphics :file iptw.png
+  love.plot(bal_tab, threshold = 0.1)
+#+END_SRC
+
+#+RESULTS:
+[[file:iptw.png]]
+
+*** Estimate average causal effect using weights 
+**** Use svyglm
+#+BEGIN_SRC R :session iptw :results output 
+  design <- svydesign(id = ~1, weights = ~weights, data = df)
+  mod <- svyglm(re78 ~ treat, design)
+  confint(mod)
+#+END_SRC
+
+#+RESULTS:
+:                 2.5 %   97.5 %
+: (Intercept)  5706.948 7138.730
+: treat1      -1559.321 2008.673
+
+**** Manually
+#+BEGIN_SRC R :session iptw :results output
+  mu_treated <- with(df, weighted.mean(re78[treat == 1],
+				       weights[treat == 1]))
+
+  mu_control <- with(df, weighted.mean(re78[treat == 0],
+				       weights[treat == 0]))
+
+  ate <- mu_treated - mu_control
+#+END_SRC
+
+*** Find causal effect with truncated weights at 0.01 and 0.99 
+#+BEGIN_SRC R :session iptw :results output
+  upper_q <- quantile(weights, 0.99)
+  lower_q <- quantile(weights, 0.01)
+
+  weights_trunc <- replace(weights, weights < lower_q, lower_q)
+  weights_trunc <- replace(weights_trunc, weights_trunc > upper_q, upper_q)
+  design_trunc <- svydesign(ids = ~1, weights = weights_trunc, data = df)
+  mod_trunc <- svyglm(re78 ~ treat, design_trunc)
+
+  confint(mod_trunc)
+#+END_SRC
+
+#+RESULTS:
+:                 2.5 %   97.5 %
+: (Intercept)  5707.033 7138.840
+: treat1      -1090.639 2064.506
