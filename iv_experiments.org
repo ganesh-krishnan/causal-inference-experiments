@@ -1,0 +1,105 @@
+#+PROPERTY: session iv_causal
+#+PROPERTY: exports both
+
+#+NAME: Load libraries
+#+BEGIN_SRC R :session iv_causal :results output silent
+  library(simcausal)
+  library(dplyr)
+  library(coefplot)
+  library(boot)
+  library(purrr)
+  library(broom)
+  library(ivpack)
+#+END_SRC
+
+* Objective
+Investigate if covariates have to be controlled for in the 1st stage
+in an IV analysis if the covariates don't influence the treatment
+
+* DAG of interest
+Let's specify the dag of interest
+#+NAME: Setup DAG of interest
+#+BEGIN_SRC R :session iv_causal :results output silentn
+    dag1 <- DAG.empty() +
+	node("c1",
+	     distr = "rnorm",
+	     mean = 5,
+	     sd = 1) +
+	node("iv",
+	     distr = "rbern",
+	     prob = plogis(0.2 * c1)) +
+	node("treatment",
+	     distr = "rbern",
+	     prob = plogis(0.5 * iv)) +
+	node("outcome",
+	     distr = "rnorm",
+	     mean = 0.5 * treatment + 0.9 * c1,
+	     sd = 1)
+
+  dset1 <- set.DAG(dag1)
+  plotDAG(dset1)
+#+END_SRC
+
+#+RESULTS: Setup DAG of interest
+: ...automatically assigning order attribute to some nodes...
+: node c1, order:1
+: node iv, order:2
+: node treatment, order:3
+: node outcome, order:4
+: using the following vertex attributes:
+: NAdarkbluenone100.50
+: using the following edge attributes:
+: black0.210.60.5
+
+We'll now simulate from the DAG
+#+NAME: Simulate from DAG
+#+BEGIN_SRC R :session iv_causal :results output silent
+  df1 <- sim(dset1, n = 10000, rndseed = 123) %>%
+      tbl_df()
+#+END_SRC
+
+* IV analysis
+** IV including covariates in both stages
+#+BEGIN_SRC R :session iv_causal :results output
+  df_list <- map(floor(runif(100, 0, 1000)), function(x) {
+      df1 <- sim(dset1, n = 10000, rndseed = x) %>%
+	  tbl_df()
+
+      return(df1)
+  })
+
+  coef_list <- map_dbl(seq_along(df_list), function(df_idx) {
+      cat(sprintf("Currently processing %d\n", df_idx))
+      df <- df_list[[df_idx]]
+      stage1_mod <- lm(treatment ~ iv + c1, data = df)
+      treatment_hat <- predict(stage1_mod)
+      df1 <- mutate(df, treatment_hat = treatment_hat)
+      stage2_mod <- lm(outcome ~ treatment_hat + c1, data = df1)
+      return(coef(stage2_mod)[2])
+  })
+#+END_SRC
+
+** IV including covariates only in second stage
+#+BEGIN_SRC R :session iv_causal :results output
+  coef_list <- map_dbl(seq_along(df_list), function(df_idx) {
+      cat(sprintf("Currently processing %d\n", df_idx))
+      df <- df_list[[df_idx]]
+      stage1_mod <- lm(treatment ~ iv, data = df)
+      treatment_hat <- predict(stage1_mod)
+      df1 <- mutate(df, treatment_hat = treatment_hat)
+      stage2_mod <- lm(outcome ~ treatment_hat + c1, data = df1)
+      return(coef(stage2_mod)[2])
+  })
+#+END_SRC
+
+** Appendix
+*** Estimation using ivpack
+#+BEGIN_SRC :session iv_causal :results output silent
+  coef_list <- map_dbl(seq_along(df_list), function(df_idx) {
+      cat(sprintf("Currently processing %d\n", df_idx))
+      iv_mod1 <- ivreg(outcome ~ treatment + c1,
+		       ~ iv + c1,
+		       x = FALSE, data = df_list[[df_idx]])
+      return(coef(iv_mod1)[2])
+  })
+#+END_SRC
