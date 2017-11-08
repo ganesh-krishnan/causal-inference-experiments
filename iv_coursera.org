@@ -1,0 +1,36 @@
+** Objective
+   This document reproduces the IV analysis in the Coursera
+   course, "A Crash Course in Causal Inference"
+
+   For this assignment we will use data from Card on the effect
+   of years in college on earnings.
+
+** Load libraries
+   #+BEGIN_SRC R :session iv :results output silent
+     library(dplyr)
+     library(ivpack)
+   #+END_SRC
+
+** Prepare Data
+   #+BEGIN_SRC R :session iv :results output silent
+     data(card.data)
+     df <- tbl_df(card.data) %>%
+	 mutate(educ12 = educ > 12)
+   #+END_SRC
+
+** 2SLS using ivpack
+   #+BEGIN_SRC R :session iv :results output
+     iv_mod_1 <- ivreg(lwage ~ educ12, ~nearc4, x = TRUE, data = df)
+     iv_mod_2 <- ivreg(lwage ~ educ12 + exper + reg661 + reg662 +
+			   reg663 + reg664 + reg665+ reg666 + reg667 + reg668,
+		       ~ nearc4 + exper + reg661+ reg662 + reg663 + reg664 +
+			   reg665 + reg666 + reg667 + reg668,
+		       x = TRUE,
+		       data = df)
+
+     iv_mod_3 <- ivreg(lwage ~ educ12 + exper + reg661 + reg662 +
+			   reg663 + reg664 + reg665+ reg666 + reg667 + reg668,
+		       ~ nearc4,
+		       x = TRUE,
+		       data = df)
+   #+END_SRC
